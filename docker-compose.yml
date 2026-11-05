@@ -1,6 +1,8 @@
 services:
   app:
     build: .
+    volumes:
+      - uploads-data:/app/uploads
     restart: unless-stopped
     environment:
       NODE_ENV: development
@@ -33,3 +35,4 @@ services:
 
 volumes:
   mongo-data:
+  uploads-data:
