@@ -1,22 +1,13 @@
-const corsOptions = {
-    origin: function (origin, callback) {
-        const allowedOrigins = [
-            'http://localhost:2000',
-            'http://localhost:3000',
-            'http://localhost:3001',
-        ];
+import config from "./config.js";
 
-        return callback(null, !origin || allowedOrigins.includes(origin));
-    },
-    credentials: true,
-    methods: [
-        'GET',
-        'POST',
-        'PUT',
-        'PATCH',
-        'DELETE',
-        'OPTIONS',
-    ],
+const allowedOrigins = new Set(config.CORS_ORIGINS);
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    return callback(null, !origin || allowedOrigins.has(origin));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 };
 
 export default corsOptions;

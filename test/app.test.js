@@ -58,6 +58,26 @@ test('health route returns a successful status payload', async () => {
     assert.equal(body.data.status, 'ok');
 });
 
+test('configured frontend origins receive CORS preflight headers', async () => {
+    const origin = config.CORS_ORIGINS[0];
+    const response = await fetch(`${baseUrl}/api/v1/auth/register`, {
+        method: 'OPTIONS',
+        headers: {
+            origin,
+            'access-control-request-method': 'POST',
+            'access-control-request-headers': 'content-type',
+        },
+    });
+
+    assert.equal(response.headers.get('access-control-allow-origin'), origin);
+    assert.equal(app.get('trust proxy'), config.TRUST_PROXY_HOPS);
+
+    const forwardedResponse = await fetch(`${baseUrl}/health`, {
+        headers: { 'x-forwarded-for': '203.0.113.1' },
+    });
+    assert.equal(forwardedResponse.status, 200);
+});
+
 test('Swagger UI and OpenAPI document are served', async () => {
     const uiResponse = await fetch(`${baseUrl}/api-docs/`);
     const uiHtml = await uiResponse.text();
