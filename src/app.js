@@ -7,9 +7,11 @@ import { notFound } from './middlewares/notFound.js';
 import ApiResponse from './utils/ApiResponse.js';
 import openApiDocument from './config/openapi.js';
 import { profilePhotoDirectory } from './modules/users/profilePhoto.js';
+import config from './config/config.js';
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', config.TRUST_PROXY_HOPS);
 security(app);
 app.use('/uploads/profile-photos', express.static(profilePhotoDirectory, {
     dotfiles: 'deny',
