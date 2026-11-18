@@ -51,7 +51,6 @@ const transactionSchema = new mongoose.Schema({
     versionKey: false,
 });
 
-transactionSchema.index({ userId: 1, transactionDate: -1 });
 transactionSchema.index({ userId: 1, branchId: 1, transactionDate: -1 });
 
 const Transaction = mongoose.models.Transaction

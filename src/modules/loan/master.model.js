@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import config from "../../config/config.js";
 
 const createMasterModel = (modelName) => {
   const schema = new mongoose.Schema(
@@ -6,6 +7,12 @@ const createMasterModel = (modelName) => {
       userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",
+        required: true,
+        index: true,
+      },
+      branchId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Branch",
         required: true,
         index: true,
       },
@@ -18,6 +25,7 @@ const createMasterModel = (modelName) => {
       },
       date: { type: Date, required: true, default: Date.now },
       dueDate: { type: Date },
+      reminderTimeZone: { type: String, trim: true, default: config.DEFAULT_TIME_ZONE },
       phoneNumber: {
         type: String,
         required: true,
@@ -31,7 +39,7 @@ const createMasterModel = (modelName) => {
     { timestamps: true, versionKey: false },
   );
 
-  schema.index({ userId: 1, status: 1, date: -1 });
+  schema.index({ userId: 1, branchId: 1, status: 1, date: -1 });
 
   return mongoose.models[modelName] || mongoose.model(modelName, schema);
 };

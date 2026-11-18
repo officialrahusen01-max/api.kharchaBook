@@ -8,6 +8,12 @@ const createMasterModel = (modelName) => {
             required: true,
             index: true,
         },
+        branchId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Branch',
+            required: true,
+            index: true,
+        },
         name: {
             type: String,
             required: true,
@@ -26,7 +32,7 @@ const createMasterModel = (modelName) => {
         versionKey: false,
     });
 
-    schema.index({ userId: 1, name: 1 }, { unique: true });
+    schema.index({ userId: 1, branchId: 1, name: 1 }, { unique: true });
 
     return mongoose.models[modelName] || mongoose.model(modelName, schema);
 };

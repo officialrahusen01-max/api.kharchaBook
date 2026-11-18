@@ -2,6 +2,7 @@ import app from './src/app.js';
 import config from './src/config/config.js';
 import { connectDB, disconnectDB } from './src/config/database.js';
 import logger from './src/utils/logger.js';
+import { startReminderScheduler, stopReminderScheduler } from './src/modules/notifications/service.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -14,12 +15,14 @@ export const startServer = async () => {
     });
 
     logger.info(`Server is running on port ${config.PORT}`);
+    startReminderScheduler();
 
     let shuttingDown = false;
-    const shutdown = (signal) => {
+    const shutdown = async (signal) => {
         if (shuttingDown) return;
         shuttingDown = true;
         logger.info(`${signal} received; shutting down`);
+        await stopReminderScheduler();
 
         server.close(async (error) => {
             if (error) {

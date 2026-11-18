@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { isValidTimeZone } from '../utils/timeZone.js';
 
 dotenv.config();
 
@@ -17,11 +18,18 @@ if (!jwtSecret || Buffer.byteLength(jwtSecret, 'utf8') < 32) {
     throw new Error('JWT_SECRET must be set to a secret of at least 32 bytes.');
 }
 
+const defaultTimeZone = process.env.DEFAULT_TIME_ZONE?.trim() || 'Asia/Kolkata';
+if (!isValidTimeZone(defaultTimeZone)) {
+    throw new Error('DEFAULT_TIME_ZONE must be a valid IANA time zone.');
+}
+
 const config = Object.freeze({
     NODE_ENV: process.env.NODE_ENV ?? 'development',
     PORT: port,
     MONGODB_URI: mongoUri,
     JWT_SECRET: jwtSecret,
+    FIREBASE_SERVICE_ACCOUNT_PATH: process.env.FIREBASE_SERVICE_ACCOUNT_PATH?.trim() ?? '',
+    DEFAULT_TIME_ZONE: defaultTimeZone,
 });
 
 export default config;

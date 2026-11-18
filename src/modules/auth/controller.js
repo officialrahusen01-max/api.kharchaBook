@@ -12,6 +12,9 @@ import { ExpenseType, IncomeType, PaymentMode } from '../transactions/masters.mo
 import Branch from '../branches/model.js';
 import { createDefaultBranch } from '../branches/service.js';
 import { branchToResponse } from '../branches/branch.schema.js';
+import Loan from '../loan/model.js';
+import FcmDevice from '../notifications/device.model.js';
+import Reminder from '../notifications/reminder.model.js';
 
 const { sign } = jwt;
 const accessTokenLifetimeSeconds = 60 * 60;
@@ -30,11 +33,19 @@ const hashRefreshToken = (token) => createHash('sha256').update(token).digest('h
 
 const createRefreshToken = () => randomBytes(64).toString('base64url');
 
-const createAccessToken = (userId, branch) => sign(
-    { branchId: String(branch._id ?? branch.id), role: branch.role },
+const getAccountId = (user) => user.role === 'admin'
+    ? user.id
+    : user.ownerUserId?.toString();
+
+const createAccessToken = (user, branch) => sign(
+    {
+        accountId: getAccountId(user),
+        branchId: String(branch._id ?? branch.id),
+        role: user.role,
+    },
     config.JWT_SECRET,
     {
-        subject: userId,
+        subject: user.id,
         issuer: 'kharcha-book-api',
         audience: 'kharcha-book-client',
         expiresIn: accessTokenLifetimeSeconds,
@@ -85,10 +96,12 @@ const toPublicUser = (user) => ({
     id: user.id,
     fullName: user.fullName,
     phoneNumber: user.phoneNumber,
-    email: user.email,
+    email: user.email ?? null,
     gender: user.gender,
-    dob: user.dob,
+    dob: user.dob ?? null,
     accountType: user.accountType,
+    role: user.role,
+    branchId: user.branchId?.toString() ?? null,
     organisationName: user.organisationName ?? null,
     address: user.address ?? null,
     defaultBranchId: user.defaultBranchId?.toString() ?? null,
@@ -109,12 +122,11 @@ class AuthController {
             address,
         } = req.body;
         const normalizedEmail = email.toLowerCase();
-        const [existingUser, existingBranch] = await Promise.all([
-            User.findOne({ $or: [{ email: normalizedEmail }, { phoneNumber }] }).select('_id'),
-            Branch.exists({ phoneNumber }),
-        ]);
+        const existingUser = await User.findOne({
+            $or: [{ email: normalizedEmail }, { phoneNumber }],
+        }).select('_id');
 
-        if (existingUser || existingBranch) {
+        if (existingUser) {
             throw new ApiError(409, 'An account with this email or phone number already exists.');
         }
 
@@ -123,16 +135,20 @@ class AuthController {
             fullName,
             phoneNumber,
             email: normalizedEmail,
+            passwordHash,
+            role: 'admin',
             gender,
             dob,
             accountType,
             organisationName: accountType === 'business' ? organisationName : null,
             address,
         });
+        user.ownerUserId = user._id;
 
         let defaultBranch;
         try {
-            defaultBranch = await createDefaultBranch(user.id, user, passwordHash);
+            await user.save();
+            defaultBranch = await createDefaultBranch(user.id, user);
         } catch (error) {
             await User.deleteOne({ _id: user.id });
             throw error;
@@ -152,35 +168,43 @@ class AuthController {
             throw new ApiError(400, 'Password must be provided for login.');
         }
 
-        const branch = await Branch.findOne({ phoneNumber }).select('+passwordHash');
-        const isMatch = branch ? await verifyPassword(password, branch.passwordHash) : false;
-        const user = isMatch ? await User.findById(branch.userId) : null;
-        if (!user) {
+        const user = await User.findOne({ phoneNumber }).select('+passwordHash');
+        const isMatch = user ? await verifyPassword(password, user.passwordHash) : false;
+        if (!user || !isMatch || user.role !== 'admin') {
+            throw new ApiError(401, 'Invalid phone number or password.');
+        }
+
+        const accountId = user && getAccountId(user);
+        const branchId = user?.role === 'admin' ? user.defaultBranchId : user?.branchId;
+        const branch = isMatch && accountId && branchId
+            ? await Branch.findOne({ _id: branchId, userId: accountId })
+            : null;
+        if (!branch) {
             throw new ApiError(401, 'Invalid phone number or password.');
         }
 
         const transport = getRefreshTokenTransport(req);
-        const accessToken = createAccessToken(user.id, branch);
+        const accessToken = createAccessToken(user, branch);
         const refreshToken = createRefreshToken();
         const tokenHash = hashRefreshToken(refreshToken);
         const expiresAt = new Date(Date.now() + refreshTokenLifetimeMs);
         await RefreshToken.findOneAndUpdate(
-            { branchId: branch.id },
+            { userId: user.id },
             {
-                $set: { tokenHash, expiresAt },
-                $setOnInsert: { userId: user.id, branchId: branch.id },
+                $set: { tokenHash, expiresAt, branchId: branch.id },
+                $setOnInsert: { userId: user.id },
             },
             { new: true, upsert: true },
         );
         await RefreshToken.deleteMany({
-            branchId: branch.id,
+            userId: user.id,
             tokenHash: { $ne: tokenHash },
         });
 
         const data = setRefreshTokenResponse(res, {
             user: toPublicUser(user),
             branch: branchToResponse(branch, user.defaultBranchId),
-            role: branch.role,
+            role: user.role,
             accessToken,
             tokenType: 'Bearer',
             expiresIn: accessTokenLifetimeSeconds,
@@ -215,14 +239,19 @@ class AuthController {
             throw new ApiError(401, 'Invalid or expired refresh token.');
         }
 
-        const branch = await Branch.findOne({ _id: session.branchId, userId: session.userId });
-        if (!branch) {
+        const user = await User.findById(session.userId)
+            .select('role ownerUserId branchId defaultBranchId');
+        const accountId = user && getAccountId(user);
+        const branch = user?.role === 'admin' && accountId
+            ? await Branch.findOne({ _id: session.branchId, userId: accountId })
+            : null;
+        if (!user || user.role !== 'admin' || !branch) {
             throw new ApiError(401, 'Invalid or expired refresh token.');
         }
 
         const transport = req.body?.refreshToken ? 'body' : 'cookie';
         const data = setRefreshTokenResponse(res, {
-            accessToken: createAccessToken(session.userId.toString(), branch),
+            accessToken: createAccessToken(user, branch),
             tokenType: 'Bearer',
             expiresIn: accessTokenLifetimeSeconds,
         }, transport, nextRefreshToken);
@@ -245,27 +274,27 @@ class AuthController {
         if (!user) {
             throw new ApiError(404, 'User account was not found.');
         }
+        const accountUsers = await User.find({
+            $or: [{ _id: userId }, { ownerUserId: userId }],
+        }).select('_id profilePhoto');
+        const accountUserIds = accountUsers.map(({ _id }) => _id);
 
         await Promise.all([
-            RefreshToken.deleteMany({ userId }),
+            RefreshToken.deleteMany({ userId: { $in: accountUserIds } }),
+            FcmDevice.deleteMany({ userId }),
+            Reminder.deleteMany({ userId }),
             Transaction.deleteMany({ userId }),
             ExpenseType.deleteMany({ userId }),
             IncomeType.deleteMany({ userId }),
             PaymentMode.deleteMany({ userId }),
+            Loan.deleteMany({ userId }),
             Branch.deleteMany({ userId }),
+            User.deleteMany({ _id: { $in: accountUserIds } }),
         ]);
-        const deletedUser = await User.findByIdAndDelete(userId);
-        if (!deletedUser) {
-            throw new ApiError(404, 'User account was not found.');
-        }
 
-        await deleteProfilePhoto(deletedUser.profilePhoto);
+        await Promise.all(accountUsers.map(({ profilePhoto }) => deleteProfilePhoto(profilePhoto)));
         clearRefreshCookie(res);
         res.status(200).json(new ApiResponse(200, {}, 'Account deleted successfully'));
-    }
-
-    static async otp(req, res) {
-        throw new ApiError(501, 'OTP verification is not implemented yet.');
     }
 }
 

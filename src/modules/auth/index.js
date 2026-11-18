@@ -13,6 +13,5 @@ router.post('/register', validate(registerSchema), AuthController.register)
       .post('/refresh', AuthController.refresh)
       .post('/logout', auth, AuthController.logout)
       .delete('/deleteAccount', auth, requireAdmin, AuthController.deleteAccount)
-      .post('/otp', AuthController.otp)
 
 export default router;

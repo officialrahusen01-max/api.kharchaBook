@@ -3,11 +3,14 @@ import ApiError from '../../utils/ApiError.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import User from '../users/model.js';
 import Transaction from '../transactions/model.js';
+import Loan from '../loan/model.js';
 import RefreshToken from '../auth/refreshToken.model.js';
-import { hashPassword } from '../auth/password.js';
 import Branch from './model.js';
+import { ExpenseType, IncomeType, PaymentMode } from '../transactions/masters.model.js';
 import { branchToResponse, createBranchSchema, updateBranchSchema } from './branch.schema.js';
 import { getDefaultBranchId, isAdmin } from './service.js';
+import FcmDevice from '../notifications/device.model.js';
+import Reminder from '../notifications/reminder.model.js';
 
 const getIssues = (error) => error.issues.map(({ path, code, message }) => ({
     path,
@@ -29,7 +32,7 @@ const assertValidId = (id) => {
     }
 };
 
-// Admins reach every branch of the account; branch users only their own.
+// Account owners may manage branches; legacy branch-user tokens are restricted to their branch.
 const findAccessibleBranch = async (req) => {
     assertValidId(req.params.id);
     if (!isAdmin(req.user) && req.params.id !== req.user.branchId) {
@@ -40,17 +43,6 @@ const findAccessibleBranch = async (req) => {
         throw new ApiError(404, 'Branch was not found.');
     }
     return branch;
-};
-
-const assertAnotherAdminExists = async (branch) => {
-    const otherAdmin = await Branch.exists({
-        userId: branch.userId,
-        role: 'admin',
-        _id: { $ne: branch._id },
-    });
-    if (!otherAdmin) {
-        throw new ApiError(409, 'An account must keep at least one admin branch.');
-    }
 };
 
 class BranchController {
@@ -71,11 +63,10 @@ class BranchController {
     }
 
     static async create(req, res) {
-        const { password, ...data } = parseOrThrow(createBranchSchema, req.body);
+        const data = parseOrThrow(createBranchSchema, req.body);
         const defaultBranchId = await getDefaultBranchId(req.user.id);
         const branch = await Branch.create({
             ...data,
-            passwordHash: await hashPassword(password),
             userId: req.user.id,
         });
         res.status(201).json(new ApiResponse(
@@ -86,24 +77,10 @@ class BranchController {
     }
 
     static async update(req, res) {
-        const { password, ...updates } = parseOrThrow(updateBranchSchema, req.body);
+        const updates = parseOrThrow(updateBranchSchema, req.body);
         const branch = await findAccessibleBranch(req);
-
-        if (updates.role && !isAdmin(req.user)) {
-            throw new ApiError(403, 'Only an admin can change branch roles.');
-        }
-        if (updates.role === 'user' && branch.role === 'admin') {
-            await assertAnotherAdminExists(branch);
-        }
-
         Object.assign(branch, updates);
-        if (password) {
-            branch.passwordHash = await hashPassword(password);
-        }
         await branch.save();
-        if (password || updates.role) {
-            await RefreshToken.deleteMany({ branchId: branch._id });
-        }
 
         const defaultBranchId = await getDefaultBranchId(req.user.id);
         res.status(200).json(new ApiResponse(
@@ -130,18 +107,24 @@ class BranchController {
         if (branch.id === defaultBranchId) {
             throw new ApiError(409, 'The default branch cannot be deleted. Set another branch as default first.');
         }
-        if (branch.role === 'admin') {
-            await assertAnotherAdminExists(branch);
-        }
-
-        const isInUse = await Transaction.exists({ userId: req.user.id, branchId: branch._id });
+        const [hasTransactions, hasLoans, hasExpenseTypes, hasIncomeTypes, hasPaymentModes] = await Promise.all([
+            Transaction.exists({ userId: req.user.id, branchId: branch._id }),
+            Loan.exists({ userId: req.user.id, branchId: branch._id }),
+            ExpenseType.exists({ userId: req.user.id, branchId: branch._id }),
+            IncomeType.exists({ userId: req.user.id, branchId: branch._id }),
+            PaymentMode.exists({ userId: req.user.id, branchId: branch._id }),
+        ]);
+        const isInUse = hasTransactions || hasLoans || hasExpenseTypes || hasIncomeTypes || hasPaymentModes;
         if (isInUse) {
-            throw new ApiError(409, 'This branch has transactions and cannot be deleted.');
+            throw new ApiError(409, 'This branch has finance records and cannot be deleted.');
         }
 
         await Promise.all([
             branch.deleteOne(),
             RefreshToken.deleteMany({ branchId: branch._id }),
+            FcmDevice.deleteMany({ userId: req.user.id, branchId: branch._id }),
+            Reminder.deleteMany({ userId: req.user.id, branchId: branch._id }),
+            User.deleteMany({ ownerUserId: req.user.id, branchId: branch._id, role: 'user' }),
         ]);
         res.status(200).json(new ApiResponse(200, {}, 'Branch deleted successfully'));
     }

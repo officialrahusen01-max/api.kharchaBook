@@ -3,10 +3,14 @@ services:
     build: .
     volumes:
       - uploads-data:/app/uploads
+      - ${FIREBASE_SERVICE_ACCOUNT_FILE:-./kharchabook-68337-firebase.json}:/run/secrets/firebase-service-account.json:ro
     restart: unless-stopped
     environment:
       NODE_ENV: development
-      MONGODB_URI: mongodb+srv://rahulsen2003:e8wnt3vcgb@cluster0.k74riut.mongodb.net/kharchaBook
+      MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in .env}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      FIREBASE_SERVICE_ACCOUNT_PATH: /run/secrets/firebase-service-account.json
+      DEFAULT_TIME_ZONE: ${DEFAULT_TIME_ZONE:-Asia/Kolkata}
     ports:
       - "${PORT:-8000}:8000"
     depends_on:
