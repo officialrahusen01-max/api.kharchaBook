@@ -194,7 +194,7 @@ class AuthController {
                 $set: { tokenHash, expiresAt, branchId: branch.id },
                 $setOnInsert: { userId: user.id },
             },
-            { new: true, upsert: true },
+            { returnDocument: 'after', upsert: true },
         );
         await RefreshToken.deleteMany({
             userId: user.id,
@@ -232,7 +232,7 @@ class AuthController {
                     expiresAt,
                 },
             },
-            { new: true },
+            { returnDocument: 'after' },
         );
 
         if (!session) {
