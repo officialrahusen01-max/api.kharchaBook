@@ -53,7 +53,7 @@ class MasterController {
         const record = await this.Model.findOneAndUpdate(
             filter,
             { $set: parsed.data },
-            { new: true, runValidators: true },
+            { returnDocument: 'after', runValidators: true },
         );
         if (!record) {
             throw new ApiError(404, `${this.label} was not found.`);
