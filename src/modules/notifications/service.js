@@ -194,7 +194,7 @@ export const processDueReminders = async () => {
                 $set: { status: 'sending', lockedAt: now },
                 $inc: { attempts: 1 },
             },
-            { new: true, sort: { scheduledAt: 1, _id: 1 } },
+            { returnDocument: 'after', sort: { scheduledAt: 1, _id: 1 } },
         );
         if (!reminder) break;
         await processReminder(reminder);
