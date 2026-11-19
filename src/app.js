@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import swaggerUi from 'swagger-ui-express';
 import registerRoutes from './routes/index.js';
 import security from './middlewares/security.js';
@@ -41,7 +42,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.status(200).json(new ApiResponse(200, { status: 'ok' }, 'Service is healthy'));
+    res.status(200).json(new ApiResponse(200, { status: 'ok', database: mongoose.connection.readyState === 1 ? 'connected' : 'connecting' }, 'Service is healthy'));
 });
 
 registerRoutes(app);
