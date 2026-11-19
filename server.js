@@ -7,20 +7,36 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 export const startServer = async () => {
-    await connectDB();
-
     const server = await new Promise((resolve, reject) => {
-        const instance = app.listen(config.PORT, () => resolve(instance));
+        const instance = app.listen(config.PORT, '0.0.0.0', () => resolve(instance));
         instance.once('error', reject);
     });
 
     logger.info(`Server is running on port ${config.PORT}`);
-    startReminderScheduler();
+
+    // Open the port first so hosts like Render detect the service even if MongoDB is slow or unreachable.
+    let stopped = false;
+    const connectWithRetry = async () => {
+        let delay = 2000;
+        while (!stopped) {
+            try {
+                await connectDB();
+                startReminderScheduler();
+                return;
+            } catch (error) {
+                logger.error(`MongoDB connection failed; retrying in ${delay / 1000}s:`, error.message);
+                await new Promise((resolve) => setTimeout(resolve, delay).unref());
+                delay = Math.min(delay * 2, 30000);
+            }
+        }
+    };
+    server.dbReady = connectWithRetry();
 
     let shuttingDown = false;
     const shutdown = async (signal) => {
         if (shuttingDown) return;
         shuttingDown = true;
+        stopped = true;
         logger.info(`${signal} received; shutting down`);
         await stopReminderScheduler();
 
