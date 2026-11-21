@@ -40,7 +40,12 @@ const authenticate = (req, res, next) => {
         return;
     }
 
-    req.user = { id: payload.sub, branchId: payload.branchId, role: payload.role };
+    req.user = {
+        id: typeof payload.accountId === 'string' ? payload.accountId : payload.sub,
+        authUserId: payload.sub,
+        branchId: payload.branchId,
+        role: payload.role,
+    };
     next();
 };
 

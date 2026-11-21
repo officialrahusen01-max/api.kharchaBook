@@ -2,7 +2,8 @@ import ApiError from '../../utils/ApiError.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import { ExpenseType, IncomeType, PaymentMode } from './masters.model.js';
 import Transaction from './model.js';
-import { createMasterSchema, updateMasterSchema } from './master.schema.js';
+import { createMasterSchema, masterQuerySchema, updateMasterSchema } from './master.schema.js';
+import { isAdmin, resolveBranchId } from '../branches/service.js';
 
 const getIssues = (error) => error.issues.map(({ path, code, message }) => ({
     path,
@@ -12,7 +13,12 @@ const getIssues = (error) => error.issues.map(({ path, code, message }) => ({
 
 class MasterController {
     static async list(req, res) {
-        const records = await this.Model.find({ userId: req.user.id }).sort({ name: 1 });
+        const parsed = masterQuerySchema.safeParse(req.query);
+        if (!parsed.success) {
+            throw new ApiError(400, 'Invalid master filter.', getIssues(parsed.error));
+        }
+        const branchId = await resolveBranchId(req.user, parsed.data.branchId);
+        const records = await this.Model.find({ userId: req.user.id, branchId }).sort({ name: 1 });
         res.status(200).json(new ApiResponse(
             200,
             records,
@@ -26,7 +32,9 @@ class MasterController {
             throw new ApiError(400, 'Invalid master data.', getIssues(parsed.error));
         }
 
-        const record = await this.Model.create({ ...parsed.data, userId: req.user.id });
+        const { branchId: requestedBranchId, ...fields } = parsed.data;
+        const branchId = await resolveBranchId(req.user, requestedBranchId);
+        const record = await this.Model.create({ ...fields, userId: req.user.id, branchId });
         res.status(201).json(new ApiResponse(
             201,
             record,
@@ -40,10 +48,12 @@ class MasterController {
             throw new ApiError(400, 'Invalid master data.', getIssues(parsed.error));
         }
 
+        const filter = { _id: req.params.id, userId: req.user.id };
+        if (!isAdmin(req.user)) filter.branchId = req.user.branchId;
         const record = await this.Model.findOneAndUpdate(
-            { _id: req.params.id, userId: req.user.id },
+            filter,
             { $set: parsed.data },
-            { new: true, runValidators: true },
+            { returnDocument: 'after', runValidators: true },
         );
         if (!record) {
             throw new ApiError(404, `${this.label} was not found.`);
@@ -57,13 +67,16 @@ class MasterController {
     }
 
     static async remove(req, res) {
-        const record = await this.Model.findOne({ _id: req.params.id, userId: req.user.id });
+        const filter = { _id: req.params.id, userId: req.user.id };
+        if (!isAdmin(req.user)) filter.branchId = req.user.branchId;
+        const record = await this.Model.findOne(filter);
         if (!record) {
             throw new ApiError(404, `${this.label} was not found.`);
         }
 
         const isInUse = await Transaction.exists({
             userId: req.user.id,
+            branchId: record.branchId,
             [this.transactionField]: record.id,
         });
         if (isInUse) {

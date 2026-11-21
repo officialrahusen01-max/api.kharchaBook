@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import swaggerUi from 'swagger-ui-express';
 import registerRoutes from './routes/index.js';
 import security from './middlewares/security.js';
@@ -7,9 +8,11 @@ import { notFound } from './middlewares/notFound.js';
 import ApiResponse from './utils/ApiResponse.js';
 import openApiDocument from './config/openapi.js';
 import { profilePhotoDirectory } from './modules/users/profilePhoto.js';
+import config from './config/config.js';
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', config.TRUST_PROXY_HOPS);
 security(app);
 app.use('/uploads/profile-photos', express.static(profilePhotoDirectory, {
     dotfiles: 'deny',
@@ -39,7 +42,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.status(200).json(new ApiResponse(200, { status: 'ok' }, 'Service is healthy'));
+    res.status(200).json(new ApiResponse(200, { status: 'ok', database: mongoose.connection.readyState === 1 ? 'connected' : 'connecting' }, 'Service is healthy'));
 });
 
 registerRoutes(app);

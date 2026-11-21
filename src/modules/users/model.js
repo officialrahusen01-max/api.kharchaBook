@@ -18,27 +18,57 @@ const userSchema = new mongoose.Schema({
     },
     email: {
         type: String,
-        required: true,
         trim: true,
         lowercase: true,
         maxlength: 254,
         unique: true,
+        sparse: true,
     },
     gender: {
         type: String,
-        required: true,
         trim: true,
         maxlength: 30,
+        default: '',
     },
     dob: {
         type: Date,
-        required: true,
+        default: null,
     },
     profilePhoto: {
         type: String,
         trim: true,
         maxlength: 500,
         default: null,
+    },
+    softPassword: {
+        type: String,
+        trim: true,
+        maxlength: 4,
+        default: null,
+        select: false,
+    },
+    passwordHash: {
+        type: String,
+        required: true,
+        select: false,
+    },
+    role: {
+        type: String,
+        enum: ['admin', 'user'],
+        default: 'user',
+        required: true,
+    },
+    ownerUserId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null,
+        index: true,
+    },
+    branchId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Branch',
+        default: null,
+        index: true,
     },
     accountType: {
         type: String,
@@ -67,10 +97,17 @@ const userSchema = new mongoose.Schema({
         transform: (document, result) => {
             result.id = result._id.toString();
             delete result._id;
+            delete result.passwordHash;
+            delete result.softPassword;
             return result;
         },
     },
 });
+
+userSchema.index(
+    { ownerUserId: 1, branchId: 1 },
+    { unique: true, partialFilterExpression: { role: 'user', branchId: { $type: 'objectId' } } },
+);
 
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 

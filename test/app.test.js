@@ -9,6 +9,9 @@ import { deleteProfilePhoto, saveProfilePhoto } from '../src/modules/users/profi
 import Transaction from '../src/modules/transactions/model.js';
 import { ExpenseType, IncomeType, PaymentMode } from '../src/modules/transactions/masters.model.js';
 import Branch from '../src/modules/branches/model.js';
+import Loan from '../src/modules/loan/model.js';
+import FcmDevice from '../src/modules/notifications/device.model.js';
+import Reminder from '../src/modules/notifications/reminder.model.js';
 
 process.env.MONGODB_URI ??= 'mongodb://localhost:27017/kharcha-book-test';
 process.env.JWT_SECRET ??= 'test-secret-that-is-at-least-32-characters-long';
@@ -55,6 +58,26 @@ test('health route returns a successful status payload', async () => {
     assert.equal(body.data.status, 'ok');
 });
 
+test('configured frontend origins receive CORS preflight headers', async () => {
+    const origin = config.CORS_ORIGINS[0];
+    const response = await fetch(`${baseUrl}/api/v1/auth/register`, {
+        method: 'OPTIONS',
+        headers: {
+            origin,
+            'access-control-request-method': 'POST',
+            'access-control-request-headers': 'content-type',
+        },
+    });
+
+    assert.equal(response.headers.get('access-control-allow-origin'), origin);
+    assert.equal(app.get('trust proxy'), config.TRUST_PROXY_HOPS);
+
+    const forwardedResponse = await fetch(`${baseUrl}/health`, {
+        headers: { 'x-forwarded-for': '203.0.113.1' },
+    });
+    assert.equal(forwardedResponse.status, 200);
+});
+
 test('Swagger UI and OpenAPI document are served', async () => {
     const uiResponse = await fetch(`${baseUrl}/api-docs/`);
     const uiHtml = await uiResponse.text();
@@ -70,6 +93,8 @@ test('Swagger UI and OpenAPI document are served', async () => {
     assert.ok(document.paths['/api/v1/auth/login']);
     assert.ok(document.paths['/api/v1/auth/refresh']);
     assert.ok(document.paths['/api/v1/auth/logout']);
+    assert.ok(document.paths['/api/v1/auth/deleteAccount']);
+    assert.ok(document.paths['/api/v1/branches']);
     assert.ok(document.paths['/api/v1/users/profile']);
     assert.ok(document.paths['/api/v1/users/profile/photo']);
     assert.ok(document.paths['/api/v1/transactions']);
@@ -77,10 +102,20 @@ test('Swagger UI and OpenAPI document are served', async () => {
     assert.ok(document.paths['/api/v1/transactions/expense-types']);
     assert.ok(document.paths['/api/v1/transactions/income-types']);
     assert.ok(document.paths['/api/v1/transactions/payment-modes']);
+    assert.ok(document.paths['/api/v1/loanBook']);
+    assert.ok(document.paths['/api/v1/notifications/devices']);
+    assert.ok(document.paths['/api/v1/notifications/reminders']);
+    assert.ok(document.components.schemas.LoanWrite);
+    assert.ok(document.components.schemas.ReminderWrite);
+    assert.equal(document.paths['/api/v1/accounts'], undefined);
+    assert.equal(document.paths['/api/v1/categories'], undefined);
     assert.deepEqual(
         document.components.schemas.RegisterRequest.required,
         ['fullName', 'phoneNumber', 'email', 'gender', 'dob', 'password', 'accountType', 'address'],
     );
+    assert.deepEqual(document.components.schemas.BranchWrite.required, ['name', 'address']);
+    assert.equal(document.components.schemas.BranchWrite.properties.password, undefined);
+    assert.deepEqual(Object.keys(document.components.schemas.BranchWrite.properties), ['name', 'address']);
 });
 
 test('profile routes require a valid access token', async () => {
@@ -147,6 +182,8 @@ test('authenticated user can retrieve and update profile fields', async () => {
 
 test('user can create a private expense type master', async () => {
     const originalCreate = ExpenseType.create;
+    const originalUserFindById = User.findById;
+    User.findById = () => ({ select: async () => ({ defaultBranchId: '64b0000000000000000000b1' }) });
     let savedRecord;
     ExpenseType.create = async (record) => {
         savedRecord = { id: 'expense-type-id', ...record };
@@ -176,6 +213,7 @@ test('user can create a private expense type master', async () => {
         assert.equal(savedRecord.userId, 'test-user-id');
     } finally {
         ExpenseType.create = originalCreate;
+        User.findById = originalUserFindById;
     }
 });
 
@@ -184,8 +222,12 @@ test('expense transaction stores amount in paise and requires user-owned masters
     const originalPaymentExists = PaymentMode.exists;
     const originalTransactionCreate = Transaction.create;
     const originalUserFindById = User.findById;
-    ExpenseType.exists = async (filter) => filter.userId === 'test-user-id';
-    PaymentMode.exists = async (filter) => filter.userId === 'test-user-id';
+    ExpenseType.exists = async (filter) => (
+        filter.userId === 'test-user-id' && filter.branchId === '64b0000000000000000000b1'
+    );
+    PaymentMode.exists = async (filter) => (
+        filter.userId === 'test-user-id' && filter.branchId === '64b0000000000000000000b1'
+    );
     User.findById = () => ({ select: async () => ({ defaultBranchId: '64b0000000000000000000b1' }) });
     let savedTransaction;
     Transaction.create = async (record) => {
@@ -337,14 +379,9 @@ test('profile update stores a validated local profile photo and serves it', asyn
     }
 });
 
-test('OTP endpoint returns an explicit 501 response', async () => {
-    for (const endpoint of ['otp']) {
-        const response = await fetch(`${baseUrl}/api/v1/auth/${endpoint}`, { method: 'POST' });
-        const body = await response.json();
-
-        assert.equal(response.status, 501);
-        assert.equal(body.success, false);
-    }
+test('unimplemented OTP route is not exposed', async () => {
+    const response = await fetch(`${baseUrl}/api/v1/auth/otp`, { method: 'POST' });
+    assert.equal(response.status, 404);
 });
 
 test('login validates required credentials before database access', async () => {
@@ -380,46 +417,54 @@ const loginUser = {
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
 };
 
-const mockBranchLogin = async (role = 'admin') => {
-    const original = { branchFindOne: Branch.findOne, userFindById: User.findById };
+const mockUserLogin = async (role = 'admin') => {
+    const original = { branchFindOne: Branch.findOne, userFindOne: User.findOne };
     const passwordHash = await hashPassword('1234');
-    Branch.findOne = () => ({
+    const user = {
+        ...loginUser,
+        _id: loginUser.id,
+        role,
+        ownerUserId: role === 'admin' ? loginUser.id : '64b000000000000000000001',
+        branchId: role === 'admin' ? null : '64b0000000000000000000b1',
+        passwordHash,
+    };
+    User.findOne = () => ({
         select: async (fields) => {
             assert.equal(fields, '+passwordHash');
-            return {
-                id: '64b0000000000000000000b1',
-                _id: '64b0000000000000000000b1',
-                userId: 'test-user-id',
-                name: 'Test User',
-                phoneNumber: '+919876543210',
-                role,
-                passwordHash,
-            };
+            return user;
         },
     });
-    User.findById = async (id) => {
-        assert.equal(id, 'test-user-id');
-        return loginUser;
+    Branch.findOne = async (filter) => {
+        assert.equal(filter._id, '64b0000000000000000000b1');
+        assert.equal(filter.userId, role === 'admin' ? loginUser.id : user.ownerUserId);
+        return {
+            id: '64b0000000000000000000b1',
+            _id: '64b0000000000000000000b1',
+            userId: role === 'admin' ? loginUser.id : user.ownerUserId,
+            name: 'Test User',
+            phoneNumber: '+919876543210',
+            branchUserId: role === 'admin' ? null : user.id,
+        };
     };
     return () => {
         Branch.findOne = original.branchFindOne;
-        User.findById = original.userFindById;
+        User.findOne = original.userFindOne;
     };
 };
 
-test('login verifies the branch password hash and returns a signed access token', async () => {
-    const restoreLogin = await mockBranchLogin();
+test('login verifies the User password hash and returns a signed access token', async () => {
+    const restoreLogin = await mockUserLogin();
     const originalFindOneAndUpdate = RefreshToken.findOneAndUpdate;
     const originalDeleteMany = RefreshToken.deleteMany;
     let savedRefreshToken;
     RefreshToken.findOneAndUpdate = async (filter, update, options) => {
-        assert.equal(filter.branchId, '64b0000000000000000000b1');
-        assert.deepEqual(options, { new: true, upsert: true });
+        assert.equal(filter.userId, 'test-user-id');
+        assert.deepEqual(options, { returnDocument: 'after', upsert: true });
         savedRefreshToken = { ...update.$set, ...update.$setOnInsert };
         return savedRefreshToken;
     };
     RefreshToken.deleteMany = async (filter) => {
-        assert.equal(filter.branchId, '64b0000000000000000000b1');
+        assert.equal(filter.userId, 'test-user-id');
         assert.equal(filter.tokenHash.$ne, savedRefreshToken.tokenHash);
         return { deletedCount: 0 };
     };
@@ -452,6 +497,7 @@ test('login verifies the branch password hash and returns a signed access token'
             algorithms: ['HS256'],
         });
         assert.equal(claims.sub, 'test-user-id');
+        assert.equal(claims.accountId, 'test-user-id');
         assert.equal(claims.branchId, '64b0000000000000000000b1');
         assert.equal(claims.role, 'admin');
     } finally {
@@ -461,8 +507,27 @@ test('login verifies the branch password hash and returns a signed access token'
     }
 });
 
+test('branch-user credentials cannot create a separate branch login session', async () => {
+    const restoreLogin = await mockUserLogin('user');
+
+    try {
+        const response = await fetch(`${baseUrl}/api/v1/auth/login`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ phoneNumber: '+919876543210', password: '1234' }),
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 401);
+        assert.equal(body.message, 'Invalid phone number or password.');
+        assert.equal(body.data, undefined);
+    } finally {
+        restoreLogin();
+    }
+});
+
 test('web login sets the refresh token as an HttpOnly cookie', async () => {
-    const restoreLogin = await mockBranchLogin();
+    const restoreLogin = await mockUserLogin();
     const originalFindOneAndUpdate = RefreshToken.findOneAndUpdate;
     const originalDeleteMany = RefreshToken.deleteMany;
     RefreshToken.findOneAndUpdate = async () => ({});
@@ -491,7 +556,7 @@ test('web login sets the refresh token as an HttpOnly cookie', async () => {
 });
 
 test('a new login replaces the existing refresh-token record for that branch', async () => {
-    const restoreLogin = await mockBranchLogin();
+    const restoreLogin = await mockUserLogin();
     const originalFindOneAndUpdate = RefreshToken.findOneAndUpdate;
     const originalDeleteMany = RefreshToken.deleteMany;
     const tokenRecords = new Map();
@@ -499,11 +564,11 @@ test('a new login replaces the existing refresh-token record for that branch', a
     RefreshToken.findOneAndUpdate = async (filter, update, options) => {
         assert.equal(options.upsert, true);
         const record = {
-            ...tokenRecords.get(filter.branchId),
+            ...tokenRecords.get(filter.userId),
             ...update.$setOnInsert,
             ...update.$set,
         };
-        tokenRecords.set(filter.branchId, record);
+        tokenRecords.set(filter.userId, record);
         return record;
     };
     RefreshToken.deleteMany = async () => ({ deletedCount: 0 });
@@ -519,9 +584,9 @@ test('a new login replaces the existing refresh-token record for that branch', a
         };
 
         const firstLogin = await login();
-        const firstHash = tokenRecords.get('64b0000000000000000000b1').tokenHash;
+        const firstHash = tokenRecords.get('test-user-id').tokenHash;
         const secondLogin = await login();
-        const secondHash = tokenRecords.get('64b0000000000000000000b1').tokenHash;
+        const secondHash = tokenRecords.get('test-user-id').tokenHash;
 
         assert.equal(tokenRecords.size, 1);
         assert.notEqual(firstLogin.data.refreshToken, secondLogin.data.refreshToken);
@@ -535,12 +600,24 @@ test('a new login replaces the existing refresh-token record for that branch', a
 
 const mockRefreshBranch = () => {
     const originalBranchFindOne = Branch.findOne;
+    const originalUserFindById = User.findById;
     Branch.findOne = async (filter) => {
         assert.equal(filter._id, '64b0000000000000000000b2');
-        return { id: '64b0000000000000000000b2', _id: '64b0000000000000000000b2', role: 'user' };
+        assert.equal(filter.userId, '64b000000000000000000001');
+        return {
+            id: '64b0000000000000000000b2',
+            _id: '64b0000000000000000000b2',
+        };
     };
+    User.findById = () => ({
+        select: async () => ({
+            id: '64b000000000000000000001',
+            role: 'admin',
+        }),
+    });
     return () => {
         Branch.findOne = originalBranchFindOne;
+        User.findById = originalUserFindById;
     };
 };
 
@@ -552,7 +629,7 @@ test('refresh endpoint rotates mobile refresh tokens and rejects the old token',
         assert.notEqual(filter.tokenHash, 'mobile-refresh-token');
         assert.ok(filter.expiresAt.$gt instanceof Date);
         storedHash = update.$set.tokenHash;
-        return { userId: 'test-user-id', branchId: '64b0000000000000000000b2' };
+        return { userId: '64b000000000000000000001', branchId: '64b0000000000000000000b2' };
     };
 
     try {
@@ -569,9 +646,10 @@ test('refresh endpoint rotates mobile refresh tokens and rejects the old token',
         assert.notEqual(body.data.refreshToken, 'mobile-refresh-token');
         assert.notEqual(storedHash, body.data.refreshToken);
         const claims = verify(body.data.accessToken, config.JWT_SECRET);
-        assert.equal(claims.sub, 'test-user-id');
+        assert.equal(claims.sub, '64b000000000000000000001');
+        assert.equal(claims.accountId, '64b000000000000000000001');
         assert.equal(claims.branchId, '64b0000000000000000000b2');
-        assert.equal(claims.role, 'user');
+        assert.equal(claims.role, 'admin');
 
         RefreshToken.findOneAndUpdate = async () => null;
         const oldTokenResponse = await fetch(`${baseUrl}/api/v1/auth/refresh`, {
@@ -607,6 +685,36 @@ test('refresh endpoint rotates web refresh tokens using the HttpOnly cookie', as
     } finally {
         RefreshToken.findOneAndUpdate = originalFindOneAndUpdate;
         restoreBranch();
+    }
+});
+
+test('refresh endpoint rejects a legacy branch-user refresh session', async () => {
+    const originalFindOneAndUpdate = RefreshToken.findOneAndUpdate;
+    const originalFindById = User.findById;
+    RefreshToken.findOneAndUpdate = async () => ({
+        userId: 'branch-user-id',
+        branchId: '64b0000000000000000000b2',
+    });
+    User.findById = () => ({
+        select: async () => ({
+            id: 'branch-user-id',
+            role: 'user',
+            ownerUserId: '64b000000000000000000001',
+            branchId: '64b0000000000000000000b2',
+        }),
+    });
+
+    try {
+        const response = await fetch(`${baseUrl}/api/v1/auth/refresh`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ refreshToken: 'legacy-branch-refresh-token' }),
+        });
+
+        assert.equal(response.status, 401);
+    } finally {
+        RefreshToken.findOneAndUpdate = originalFindOneAndUpdate;
+        User.findById = originalFindById;
     }
 });
 
@@ -646,25 +754,30 @@ test('logout revokes the refresh token and clears its cookie', async () => {
 
 test('account deletion removes refresh tokens, user, and local profile photo', async () => {
     const originalFindById = User.findById;
-    const originalFindByIdAndDelete = User.findByIdAndDelete;
+    const originalFind = User.find;
+    const originalUserDeleteMany = User.deleteMany;
     const originalDeleteMany = RefreshToken.deleteMany;
     const originalTransactionDeleteMany = Transaction.deleteMany;
     const originalExpenseDeleteMany = ExpenseType.deleteMany;
     const originalIncomeDeleteMany = IncomeType.deleteMany;
     const originalPaymentDeleteMany = PaymentMode.deleteMany;
     const originalBranchDeleteMany = Branch.deleteMany;
+    const originalLoanDeleteMany = Loan.deleteMany;
+    const originalDeviceDeleteMany = FcmDevice.deleteMany;
+    const originalReminderDeleteMany = Reminder.deleteMany;
     const uploadedPhoto = await saveProfilePhoto({
         buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     });
     const deletionOrder = [];
-    const user = { id: 'test-user-id', profilePhoto: uploadedPhoto.path };
+    const user = { id: 'test-user-id', _id: 'test-user-id', profilePhoto: uploadedPhoto.path };
 
     User.findById = async (id) => {
         assert.equal(id, 'test-user-id');
         return user;
     };
+    User.find = () => ({ select: async () => [user] });
     RefreshToken.deleteMany = async (filter) => {
-        assert.equal(filter.userId, 'test-user-id');
+        assert.deepEqual(filter.userId.$in, ['test-user-id']);
         deletionOrder.push('refreshTokens');
         return { deletedCount: 1 };
     };
@@ -693,10 +806,25 @@ test('account deletion removes refresh tokens, user, and local profile photo', a
         deletionOrder.push('branches');
         return { deletedCount: 1 };
     };
-    User.findByIdAndDelete = async (id) => {
-        assert.equal(id, 'test-user-id');
+    Loan.deleteMany = async (filter) => {
+        assert.equal(filter.userId, 'test-user-id');
+        deletionOrder.push('loans');
+        return { deletedCount: 0 };
+    };
+    FcmDevice.deleteMany = async (filter) => {
+        assert.equal(filter.userId, 'test-user-id');
+        deletionOrder.push('devices');
+        return { deletedCount: 0 };
+    };
+    Reminder.deleteMany = async (filter) => {
+        assert.equal(filter.userId, 'test-user-id');
+        deletionOrder.push('reminders');
+        return { deletedCount: 0 };
+    };
+    User.deleteMany = async (filter) => {
+        assert.deepEqual(filter._id.$in, ['test-user-id']);
         deletionOrder.push('user');
-        return user;
+        return { deletedCount: 1 };
     };
 
     const accessToken = jwt.sign({ branchId: '64b0000000000000000000b1', role: 'admin' }, config.JWT_SECRET, {
@@ -719,26 +847,31 @@ test('account deletion removes refresh tokens, user, and local profile photo', a
         assert.match(response.headers.get('set-cookie'), /refreshToken=;/i);
         assert.deepEqual(
             deletionOrder.sort(),
-            ['branches', 'expenseTypes', 'incomeTypes', 'paymentModes', 'refreshTokens', 'transactions', 'user'].sort(),
+            ['branches', 'devices', 'expenseTypes', 'incomeTypes', 'loans', 'paymentModes', 'refreshTokens', 'reminders', 'transactions', 'user'].sort(),
         );
 
         const photoResponse = await fetch(`${baseUrl}${uploadedPhoto.path}`);
         assert.equal(photoResponse.status, 404);
     } finally {
         User.findById = originalFindById;
-        User.findByIdAndDelete = originalFindByIdAndDelete;
+        User.find = originalFind;
+        User.deleteMany = originalUserDeleteMany;
         RefreshToken.deleteMany = originalDeleteMany;
         Transaction.deleteMany = originalTransactionDeleteMany;
         ExpenseType.deleteMany = originalExpenseDeleteMany;
         IncomeType.deleteMany = originalIncomeDeleteMany;
         PaymentMode.deleteMany = originalPaymentDeleteMany;
         Branch.deleteMany = originalBranchDeleteMany;
+        Loan.deleteMany = originalLoanDeleteMany;
+        FcmDevice.deleteMany = originalDeviceDeleteMany;
+        Reminder.deleteMany = originalReminderDeleteMany;
         await deleteProfilePhoto(uploadedPhoto.path);
     }
 });
 
 test('login rejects unknown branches and incorrect passwords with the same response', async () => {
-    const restoreLogin = await mockBranchLogin();
+    const restoreLogin = await mockUserLogin();
+    const originalUserFindOne = User.findOne;
 
     try {
         const wrongPasswordResponse = await fetch(`${baseUrl}/api/v1/auth/login`, {
@@ -748,7 +881,7 @@ test('login rejects unknown branches and incorrect passwords with the same respo
         });
         const wrongPasswordBody = await wrongPasswordResponse.json();
 
-        Branch.findOne = () => ({ select: async () => null });
+        User.findOne = () => ({ select: async () => null });
         const unknownBranchResponse = await fetch(`${baseUrl}/api/v1/auth/login`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -761,6 +894,7 @@ test('login rejects unknown branches and incorrect passwords with the same respo
         assert.equal(wrongPasswordBody.message, unknownBranchBody.message);
     } finally {
         restoreLogin();
+        User.findOne = originalUserFindOne;
     }
 });
 
@@ -785,6 +919,7 @@ test('authentication middleware verifies bearer tokens and sets the request user
     assert.equal(nextError, undefined);
     assert.deepEqual(req.user, {
         id: 'authenticated-user-id',
+        authUserId: 'authenticated-user-id',
         branchId: '64b0000000000000000000b1',
         role: 'admin',
     });
@@ -872,13 +1007,15 @@ test('registration creates an account with a hashed password and safe response',
         return { id: 'branch-id', _id: 'branch-id', ...input };
     };
     User.create = async (input) => {
-        savedUser = input;
-        return {
+        savedUser = {
             id: 'user-id',
+            _id: 'user-id',
             ...input,
+            save: async function save() { return this; },
             dob: new Date(`${input.dob}T00:00:00.000Z`),
             createdAt: new Date('2026-01-01T00:00:00.000Z'),
         };
+        return savedUser;
     };
 
     try {
@@ -894,15 +1031,14 @@ test('registration creates an account with a hashed password and safe response',
         assert.equal(body.data.email, 'test@example.com');
         assert.equal(body.data.phoneNumber, registrationInput.phoneNumber);
         assert.equal(body.data.passwordHash, undefined);
-        assert.equal(savedUser.passwordHash, undefined);
-        assert.equal(savedBranch.passwordHash.startsWith('scrypt$'), true);
-        assert.notEqual(savedBranch.passwordHash, registrationInput.password);
-        assert.equal(savedBranch.role, 'admin');
+        assert.equal(savedUser.passwordHash.startsWith('scrypt$'), true);
+        assert.notEqual(savedUser.passwordHash, registrationInput.password);
+        assert.equal(savedUser.role, 'admin');
+        assert.equal(savedUser.ownerUserId, 'user-id');
         assert.equal(savedBranch.userId, 'user-id');
         assert.equal(savedBranch.name, 'Test User');
-        assert.equal(savedBranch.phoneNumber, registrationInput.phoneNumber);
-        assert.equal(savedBranch.email, 'test@example.com');
         assert.deepEqual(savedBranch.address, registrationInput.address);
+        assert.deepEqual(Object.keys(savedBranch).sort(), ['address', 'name', 'userId']);
         assert.equal(savedUser.accountType, 'self');
         assert.equal(savedUser.organisationName, null);
         assert.deepEqual(defaultBranchUpdate, {
@@ -923,6 +1059,7 @@ test('user profile photo path is optional', async () => {
         fullName: 'Test User',
         phoneNumber: '+919876543210',
         email: 'test@example.com',
+        passwordHash: await hashPassword('1234'),
         gender: 'prefer not to say',
         dob: new Date('1990-01-01T00:00:00.000Z'),
     });
@@ -930,6 +1067,7 @@ test('user profile photo path is optional', async () => {
         fullName: 'Test User',
         phoneNumber: '+919876543211',
         email: 'photo@example.com',
+        passwordHash: await hashPassword('1234'),
         gender: 'prefer not to say',
         dob: new Date('1990-01-01T00:00:00.000Z'),
         profilePhoto: 'uploads/profile-photos/user-photo.jpg',
@@ -1059,8 +1197,12 @@ const branchAccessToken = () => jwt.sign({ branchId: '64b0000000000000000000b1',
     algorithm: 'HS256',
 });
 
-const branchUserToken = () => jwt.sign({ branchId: '64b0000000000000000000b2', role: 'user' }, config.JWT_SECRET, {
-    subject: '64b000000000000000000001',
+const branchUserToken = () => jwt.sign({
+    accountId: '64b000000000000000000001',
+    branchId: '64b0000000000000000000b2',
+    role: 'user',
+}, config.JWT_SECRET, {
+    subject: 'branch-user-auth-id',
     issuer: 'kharcha-book-api',
     audience: 'kharcha-book-client',
     expiresIn: '1h',
@@ -1133,7 +1275,6 @@ test('branch user transactions are locked to their own branch', async () => {
         const response = await fetch(`${baseUrl}/api/v1/transactions`, {
             headers: { authorization: `Bearer ${branchUserToken()}` },
         });
-
         assert.equal(response.status, 200);
         assert.equal(transactionFilter.branchId, '64b0000000000000000000b2');
     } finally {
@@ -1141,14 +1282,199 @@ test('branch user transactions are locked to their own branch', async () => {
     }
 });
 
-test('user can create additional branches', async () => {
+test('branch user master and loan queries stay within their assigned branch and month', async () => {
+    const originalMasterFind = ExpenseType.find;
+    const originalLoanFind = Loan.find;
+    let masterFilter;
+    let loanFilter;
+    ExpenseType.find = (filter) => {
+        masterFilter = filter;
+        return { sort: async () => [] };
+    };
+    Loan.find = (filter) => {
+        loanFilter = filter;
+        return { sort: async () => [] };
+    };
+
+    try {
+        const headers = { authorization: `Bearer ${branchUserToken()}` };
+        const masterResponse = await fetch(`${baseUrl}/api/v1/transactions/expense-types`, { headers });
+        const loanResponse = await fetch(`${baseUrl}/api/v1/loanBook?month=2026-10`, { headers });
+
+        assert.equal(masterResponse.status, 200);
+        assert.equal(loanResponse.status, 200);
+        assert.deepEqual(masterFilter, {
+            userId: '64b000000000000000000001',
+            branchId: '64b0000000000000000000b2',
+        });
+        assert.deepEqual(loanFilter, {
+            userId: '64b000000000000000000001',
+            branchId: '64b0000000000000000000b2',
+            date: {
+                $gte: new Date('2026-10-01T00:00:00.000Z'),
+                $lt: new Date('2026-11-01T00:00:00.000Z'),
+            },
+        });
+    } finally {
+        ExpenseType.find = originalMasterFind;
+        Loan.find = originalLoanFind;
+    }
+});
+
+test('branch user loan creation is assigned to its branch and rejects another branch', async () => {
+    const originalCreate = Loan.create;
+    let savedLoan;
+    Loan.create = async (record) => {
+        savedLoan = record;
+        return { id: 'loan-id', ...record };
+    };
+
+    try {
+        const headers = {
+            authorization: `Bearer ${branchUserToken()}`,
+            'content-type': 'application/json',
+        };
+        const response = await fetch(`${baseUrl}/api/v1/loanBook`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                personName: 'Amit',
+                amount: 1000,
+                status: 'payable',
+                phoneNumber: '9876543210',
+                date: '2026-10-12',
+            }),
+        });
+        const blockedResponse = await fetch(`${baseUrl}/api/v1/loanBook`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                branchId: '64b0000000000000000000b1',
+                personName: 'Amit',
+                amount: 1000,
+                status: 'payable',
+                phoneNumber: '9876543210',
+            }),
+        });
+
+        assert.equal(response.status, 201);
+        assert.equal(savedLoan.userId, '64b000000000000000000001');
+        assert.equal(savedLoan.branchId, '64b0000000000000000000b2');
+        assert.equal(blockedResponse.status, 403);
+    } finally {
+        Loan.create = originalCreate;
+    }
+});
+
+test('branch user can register a notification device without exposing its FCM token', async () => {
+    const originalFindOne = FcmDevice.findOne;
+    const originalFindOneAndUpdate = FcmDevice.findOneAndUpdate;
+    let update;
+    FcmDevice.findOne = () => ({ select: async () => null });
+    FcmDevice.findOneAndUpdate = async (_filter, change) => {
+        update = change;
+        return {
+            id: 'device-id',
+            branchId: '64b0000000000000000000b2',
+            platform: 'android',
+            deviceId: 'phone-1',
+            lastSeenAt: new Date(),
+        };
+    };
+
+    try {
+        const response = await fetch(`${baseUrl}/api/v1/notifications/devices`, {
+            method: 'POST',
+            headers: {
+                authorization: `Bearer ${branchUserToken()}`,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ token: 'test-fcm-token', platform: 'android' }),
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 201);
+        assert.equal(update.$set.userId, '64b000000000000000000001');
+        assert.equal(update.$set.authUserId, 'branch-user-auth-id');
+        assert.equal(update.$set.branchId, '64b0000000000000000000b2');
+        assert.equal(body.data.token, undefined);
+    } finally {
+        FcmDevice.findOne = originalFindOne;
+        FcmDevice.findOneAndUpdate = originalFindOneAndUpdate;
+    }
+});
+
+test('branch user can schedule a custom reminder for the selected timezone', async () => {
+    const originalCreate = Reminder.create;
+    let savedReminder;
+    Reminder.create = async (data) => {
+        savedReminder = data;
+        return { id: 'reminder-id', status: 'pending', ...data };
+    };
+
+    try {
+        const response = await fetch(`${baseUrl}/api/v1/notifications/reminders`, {
+            method: 'POST',
+            headers: {
+                authorization: `Bearer ${branchUserToken()}`,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                title: 'Call supplier',
+                body: 'Check the invoice',
+                scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+                timeZone: 'Asia/Kolkata',
+            }),
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 201);
+        assert.equal(body.data.type, 'custom');
+        assert.equal(savedReminder.userId, '64b000000000000000000001');
+        assert.equal(savedReminder.branchId, '64b0000000000000000000b2');
+        assert.equal(savedReminder.timeZone, 'Asia/Kolkata');
+    } finally {
+        Reminder.create = originalCreate;
+    }
+});
+
+test('unneeded feature routes are disabled without deleting their source modules', async () => {
+    const paths = [
+        '/api/v1/accounts',
+        '/api/v1/categories',
+        '/api/v1/budgets',
+        '/api/v1/reports',
+        '/api/v1/businesses',
+        '/api/v1/subscriptions',
+        '/api/v1/ai-insights',
+    ];
+
+    for (const path of paths) {
+        const response = await fetch(`${baseUrl}${path}`);
+        assert.equal(response.status, 404, path);
+    }
+});
+
+test('account owner can create a branch without creating a branch login', async () => {
     const originalFindById = User.findById;
+    const originalUserCreate = User.create;
     const originalBranchCreate = Branch.create;
     let savedBranch;
+    let branchUserCreated = false;
     User.findById = () => ({ select: async () => ({ defaultBranchId: '64b0000000000000000000b1' }) });
     Branch.create = async (input) => {
         savedBranch = input;
-        return { id: '64b0000000000000000000b2', _id: '64b0000000000000000000b2', description: '', ...input };
+        return {
+            id: '64b0000000000000000000b2',
+            _id: '64b0000000000000000000b2',
+            description: '',
+            ...input,
+            save: async function save() { return this; },
+        };
+    };
+    User.create = async (input) => {
+        branchUserCreated = true;
+        return { id: 'unexpected-user-id', ...input };
     };
 
     try {
@@ -1160,8 +1486,6 @@ test('user can create additional branches', async () => {
             },
             body: JSON.stringify({
                 name: 'Jaipur Shop',
-                phoneNumber: '+919876543299',
-                password: '5678',
                 address: { line1: '5 Station Road', city: 'Jaipur', state: 'Rajasthan', pincode: '302006' },
             }),
         });
@@ -1172,13 +1496,65 @@ test('user can create additional branches', async () => {
         assert.equal(body.data.isDefault, false);
         assert.equal(body.data.address.city, 'Jaipur');
         assert.equal(savedBranch.userId, '64b000000000000000000001');
-        assert.equal(savedBranch.phoneNumber, '+919876543299');
-        assert.equal(savedBranch.password, undefined);
-        assert.equal(savedBranch.passwordHash.startsWith('scrypt$'), true);
-        assert.equal(body.data.passwordHash, undefined);
+        assert.deepEqual(Object.keys(savedBranch).sort(), ['address', 'name', 'userId']);
+        assert.equal(branchUserCreated, false);
+        assert.equal(body.data.branchUserId, undefined);
+        assert.equal(body.data.role, undefined);
+
+        const branchLoginPayload = await fetch(`${baseUrl}/api/v1/branches`, {
+            method: 'POST',
+            headers: {
+                authorization: `Bearer ${branchAccessToken()}`,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                name: 'Another Shop',
+                address: { line1: '1 Market Road', city: 'Jaipur', state: 'Rajasthan', pincode: '302002' },
+                phoneNumber: '+919876543298',
+            }),
+        });
+        assert.equal(branchLoginPayload.status, 400);
     } finally {
         User.findById = originalFindById;
+        User.create = originalUserCreate;
         Branch.create = originalBranchCreate;
+    }
+});
+
+test('editing branch details does not mutate the owner login profile', async () => {
+    const originalBranchFindOne = Branch.findOne;
+    const originalFindById = User.findById;
+    const selectCalls = [];
+    Branch.findOne = async () => ({
+        _id: '64b0000000000000000000b2',
+        id: '64b0000000000000000000b2',
+        name: 'Old branch name',
+        save: async function save() { return this; },
+    });
+    User.findById = () => ({
+        select: async (fields) => {
+            selectCalls.push(fields);
+            return { defaultBranchId: '64b0000000000000000000b1' };
+        },
+    });
+
+    try {
+        const response = await fetch(`${baseUrl}/api/v1/branches/64b0000000000000000000b2`, {
+            method: 'PATCH',
+            headers: {
+                authorization: `Bearer ${branchAccessToken()}`,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ name: 'New branch name' }),
+        });
+        const body = await response.json();
+
+        assert.equal(response.status, 200);
+        assert.equal(body.data.name, 'New branch name');
+        assert.deepEqual(selectCalls, ['defaultBranchId']);
+    } finally {
+        Branch.findOne = originalBranchFindOne;
+        User.findById = originalFindById;
     }
 });
 
@@ -1248,7 +1624,12 @@ test('business registration requires an organisation name and uses it for the de
     const originalBranchCreate = Branch.create;
     let savedBranch;
     User.findOne = () => ({ select: async () => null });
-    User.create = async (input) => ({ id: 'user-id', ...input });
+    User.create = async (input) => ({
+        id: 'user-id',
+        _id: 'user-id',
+        ...input,
+        save: async function save() { return this; },
+    });
     User.updateOne = async () => ({ modifiedCount: 1 });
     Branch.create = async (input) => {
         savedBranch = input;

@@ -1,12 +1,10 @@
+import config from './config.js';
+
+const allowedOrigins = new Set(config.CORS_ORIGINS);
+
 const corsOptions = {
     origin: function (origin, callback) {
-        const allowedOrigins = [
-            'http://localhost:2000',
-            'http://localhost:3000',
-            'http://localhost:3001',
-        ];
-
-        return callback(null, !origin || allowedOrigins.includes(origin));
+        return callback(null, !origin || allowedOrigins.has(origin));
     },
     credentials: true,
     methods: [

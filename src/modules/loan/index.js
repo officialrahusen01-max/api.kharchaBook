@@ -5,10 +5,10 @@ import loanController from "./loan.controller.js";
 const router = Router();
 
 router.use(authenticate);
-router.post("/loanBook", loanController.createLoan);
-router.get("/loanBook", loanController.getAllLoans);
-router.get("/loanBook/:id", loanController.getLoanById);
-router.put("/loanBook/:id", loanController.updateLoan);
-router.delete("/loanBook/:id", loanController.deleteLoan);
+router.post("/", loanController.createLoan);
+router.get("/", loanController.getAllLoans);
+router.get("/:id", loanController.getLoanById);
+router.put("/:id", loanController.updateLoan);
+router.delete("/:id", loanController.deleteLoan);
 
 export default router;

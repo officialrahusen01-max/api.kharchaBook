@@ -5,21 +5,29 @@ import Branch from './model.js';
 
 export const isAdmin = (authUser) => authUser.role === 'admin';
 
-// The default branch carries the registering user's details and login, and is the account's admin.
-export const createDefaultBranch = async (userId, user, passwordHash) => {
+// Only the branch name and address belong to the branch; credentials remain on User.
+export const createDefaultBranch = async (userId, user) => {
     const branch = await Branch.create({
         userId,
         name: (user.accountType === 'business' && user.organisationName) || user.fullName,
-        phoneNumber: user.phoneNumber,
-        email: user.email ?? null,
-        address: user.address ?? null,
-        passwordHash,
-        role: 'admin',
+        address: user.address,
     });
-    await User.updateOne(
-        { _id: userId, defaultBranchId: null },
-        { $set: { defaultBranchId: branch._id } },
-    );
+    try {
+        await User.updateOne(
+            { _id: userId, defaultBranchId: null },
+            { $set: { defaultBranchId: branch._id } },
+        );
+    } catch (error) {
+        try {
+            await branch.deleteOne();
+        } catch (cleanupError) {
+            throw new AggregateError(
+                [error, cleanupError],
+                'Default branch creation failed and the branch could not be removed.',
+            );
+        }
+        throw error;
+    }
     return branch;
 };
 

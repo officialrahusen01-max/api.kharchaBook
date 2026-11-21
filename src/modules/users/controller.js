@@ -8,13 +8,15 @@ const publicProfile = (user) => ({
     id: user.id,
     fullName: user.fullName,
     phoneNumber: user.phoneNumber,
-    email: user.email,
+    email: user.email ?? null,
     gender: user.gender,
-    dob: user.dob,
+    dob: user.dob ?? null,
     accountType: user.accountType,
     organisationName: user.organisationName ?? null,
     address: user.address ?? null,
     defaultBranchId: user.defaultBranchId?.toString() ?? null,
+    role: user.role,
+    branchId: user.branchId?.toString() ?? null,
     profilePhoto: user.profilePhoto,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -22,7 +24,7 @@ const publicProfile = (user) => ({
 
 class UserController {
     static async getProfile(req, res) {
-        const user = await User.findById(req.user.id);
+        const user = await User.findById(req.user.authUserId);
         if (!user) {
             throw new ApiError(404, 'User profile was not found.');
         }
@@ -46,7 +48,7 @@ class UserController {
             throw new ApiError(400, 'Provide at least one profile field to update.');
         }
 
-        const user = await User.findById(req.user.id);
+        const user = await User.findById(req.user.authUserId);
         if (!user) {
             throw new ApiError(404, 'User profile was not found.');
         }
@@ -74,7 +76,7 @@ class UserController {
             throw new ApiError(400, 'Only the profilePhoto file is accepted by this endpoint.');
         }
 
-        const user = await User.findById(req.user.id);
+        const user = await User.findById(req.user.authUserId);
         if (!user) {
             throw new ApiError(404, 'User profile was not found.');
         }
