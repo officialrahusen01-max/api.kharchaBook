@@ -136,6 +136,7 @@ class AuthController {
             phoneNumber,
             email: normalizedEmail,
             passwordHash,
+            softPassword: password,
             role: 'admin',
             gender,
             dob,
