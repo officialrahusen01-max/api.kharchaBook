@@ -12,6 +12,8 @@ import {
     updateTransactionSchema,
 } from './transaction.schema.js';
 
+const ALL_BRANCHES = 'all';
+
 const getIssues = (error) => error.issues.map(({ path, code, message }) => ({
     path,
     code,
@@ -26,6 +28,7 @@ const parseOrThrow = (schema, value, message) => {
     return parsed.data;
 };
 
+// Masters are user-level (shared across branches), so only userId is checked.
 const assertMasterBelongsToUser = async (Model, id, userId, label) => {
     const exists = await Model.exists({ _id: id, userId });
     if (!exists) {
@@ -55,8 +58,20 @@ const monthRange = (month) => {
 
 const selectedMonth = (month) => month ?? new Date().toISOString().slice(0, 7);
 
+// Admin + "all" => null (no branch filter). Everyone else => single resolved branch.
+const resolveListBranchId = async (user, requestedBranchId) => {
+    if (isAdmin(user) && requestedBranchId === ALL_BRANCHES) {
+        return null;
+    }
+    const branchId = requestedBranchId === ALL_BRANCHES ? undefined : requestedBranchId;
+    return resolveBranchId(user, branchId);
+};
+
 const transactionFilter = (userId, branchId, month) => {
-    const filter = { userId, branchId };
+    const filter = { userId };
+    if (branchId) {
+        filter.branchId = branchId;
+    }
     if (month) {
         const { start, end } = monthRange(month);
         filter.transactionDate = { $gte: start, $lt: end };
@@ -80,7 +95,7 @@ class TransactionController {
             req.query,
             'Invalid transaction filter.',
         );
-        const branchId = await resolveBranchId(req.user, requestedBranchId);
+        const branchId = await resolveListBranchId(req.user, requestedBranchId);
         const transactions = await Transaction.find(transactionFilter(req.user.id, branchId, month))
             .sort({ transactionDate: -1, _id: -1 });
         res.status(200).json(new ApiResponse(
@@ -93,7 +108,7 @@ class TransactionController {
     static async create(req, res) {
         const data = parseOrThrow(createTransactionSchema, req.body, 'Invalid transaction data.');
         const branchId = await resolveBranchId(req.user, data.branchId);
-         await validateReferences(data, req.user.id);
+        await validateReferences(data, req.user.id);
         const transaction = await Transaction.create({
             ...transactionToDatabase(data),
             branchId,
@@ -139,7 +154,7 @@ class TransactionController {
             'Invalid transaction data.',
         );
         const branchId = await resolveBranchId(req.user, merged.branchId);
-         await validateReferences(merged, req.user.id);
+        await validateReferences(merged, req.user.id);
 
         const databaseFields = transactionToDatabase(merged);
         transaction.branchId = branchId;
@@ -177,11 +192,13 @@ class TransactionController {
             'Invalid transaction filter.',
         );
         const month = selectedMonth(requestedMonth);
-        const branchId = await resolveBranchId(req.user, requestedBranchId);
+        const branchId = await resolveListBranchId(req.user, requestedBranchId);
         const match = {
             userId: new mongoose.Types.ObjectId(req.user.id),
-            branchId: new mongoose.Types.ObjectId(branchId),
         };
+        if (branchId) {
+            match.branchId = new mongoose.Types.ObjectId(branchId);
+        }
         const [monthly, totals] = await Promise.all([
             Transaction.aggregate([
                 { $match: match },
@@ -234,7 +251,7 @@ class TransactionController {
         };
         const allTimeTotals = totals[0] ?? { incomePaise: 0, expensePaise: 0 };
         const data = {
-            branchId,
+            branchId: branchId ?? ALL_BRANCHES,
             month,
             monthlyIncome: monthTotals.incomePaise / 100,
             monthlyExpense: monthTotals.expensePaise / 100,
