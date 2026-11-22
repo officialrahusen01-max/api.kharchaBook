@@ -26,22 +26,21 @@ const parseOrThrow = (schema, value, message) => {
     return parsed.data;
 };
 
-const assertMasterBelongsToUser = async (Model, id, userId, branchId, label) => {
-    const exists = await Model.exists({ _id: id, userId, branchId });
+const assertMasterBelongsToUser = async (Model, id, userId, label) => {
+    const exists = await Model.exists({ _id: id, userId });
     if (!exists) {
-        console.log('MASTER CHECK FAILED', { label, id, userId, branchId });
         throw new ApiError(400, `${label} does not belong to the authenticated user.`);
     }
 };
 
-const validateReferences = async (data, userId, branchId) => {
+const validateReferences = async (data, userId) => {
     const checks = [
-        assertMasterBelongsToUser(PaymentMode, data.paymentModeId, userId, branchId, 'Payment mode'),
+        assertMasterBelongsToUser(PaymentMode, data.paymentModeId, userId, 'Payment mode'),
     ];
     if (data.type === 'income') {
-        checks.push(assertMasterBelongsToUser(IncomeType, data.incomeTypeId, userId, branchId, 'Income type'));
+        checks.push(assertMasterBelongsToUser(IncomeType, data.incomeTypeId, userId, 'Income type'));
     } else {
-        checks.push(assertMasterBelongsToUser(ExpenseType, data.expenseTypeId, userId, branchId, 'Expense type'));
+        checks.push(assertMasterBelongsToUser(ExpenseType, data.expenseTypeId, userId, 'Expense type'));
     }
     await Promise.all(checks);
 };
@@ -94,7 +93,7 @@ class TransactionController {
     static async create(req, res) {
         const data = parseOrThrow(createTransactionSchema, req.body, 'Invalid transaction data.');
         const branchId = await resolveBranchId(req.user, data.branchId);
-        await validateReferences(data, req.user.id, branchId);
+         await validateReferences(data, req.user.id);
         const transaction = await Transaction.create({
             ...transactionToDatabase(data),
             branchId,
@@ -140,7 +139,7 @@ class TransactionController {
             'Invalid transaction data.',
         );
         const branchId = await resolveBranchId(req.user, merged.branchId);
-        await validateReferences(merged, req.user.id, branchId);
+         await validateReferences(merged, req.user.id);
 
         const databaseFields = transactionToDatabase(merged);
         transaction.branchId = branchId;
