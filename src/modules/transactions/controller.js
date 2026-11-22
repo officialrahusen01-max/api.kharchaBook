@@ -29,6 +29,7 @@ const parseOrThrow = (schema, value, message) => {
 const assertMasterBelongsToUser = async (Model, id, userId, branchId, label) => {
     const exists = await Model.exists({ _id: id, userId, branchId });
     if (!exists) {
+        console.log('MASTER CHECK FAILED', { label, id, userId, branchId });
         throw new ApiError(400, `${label} does not belong to the authenticated user.`);
     }
 };
